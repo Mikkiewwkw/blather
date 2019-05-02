@@ -19,10 +19,10 @@ int main(int argc, char **argv)
   sigaction(SIGINT, &my_sa, NULL);
 
   my_sa.sa_handler = handle_SIGTERM;
-  sigaction(SIGTERM, &my_sa, NULL)
+  sigaction(SIGTERM, &my_sa, NULL);
 
   server_t *server;
-  server_start(server,argv,DEFAULT_PERMS);
+  server_start(server,argv[0],DEFAULT_PERMS);
   while(1)
   {
     if(sig_flag)
@@ -37,7 +37,7 @@ int main(int argc, char **argv)
     }
 
     int number_clients = server->n_clients;
-    for(int i=0;i<count;i++)
+    for(int i=0;i<number_clients;i++)
     {
       if(sig_flag)
       {

@@ -4,7 +4,7 @@ client_t *server_get_client(server_t *server, int idx)
 {
   check_fail(idx > (server->n_clients),0,"The index is beyond number of clients\n");
 
-  client_t client = server->client[idx];
+  client_t *client = &(server->client[idx]);
   return client;
 }
 // Gets a pointer to the client_t struct at the given index. If the
@@ -18,11 +18,11 @@ void server_start(server_t *server, char *server_name, int perms)
   sprintf(name,"%s.fifo", server_name);
   remove(name);                                               // remove old FIFO that has the server_name, ensures starting in a good state
   int myfd = mkfifo(name, perms);                          // create join FIFO for clients
-  check_fail(myfd < 0, "Couldn't create file %s", name);
+  check_fail(myfd < 0, 1,"Couldn't create file %s", name);
 
   int join_fd = open(name, O_RDWR);
-  check_fail(join_fd < 0, "Couldn't open file %s", name);
-  server->join_ffd_set my_set;void FD_ZERO(fd_set *set);// clear entire setvoid FD_SET(int fd, fd_set *set);   // fd now in setvoid FD_CLR(int fd, fd_set *set);   // fd now not in setint  FD_ISSET(int fd, fd_set *set)d = join_fd;
+  check_fail(join_fd < 0, 1,"Couldn't open file %s", name);
+  server->join_fd = join_fd;
   server->join_ready = 0;
   server->n_clients = 0;
 }
@@ -72,9 +72,9 @@ int server_add_client(server_t *server, join_t *join)
   strcpy(new_client.name,join->name);
   new_client.data_ready = 0;
 
-  int to_client_fifo = mkfifo(join->to_client_fname, DEFAULT_PERMS);
   char *to_client_name;
-  sprintf(to_client_name, "%s.fifo",join->to_client_fname)
+  sprintf(to_client_name, "%s.fifo",join->to_client_fname);
+  int to_client_fifo = mkfifo(to_client_name, DEFAULT_PERMS);
   check_fail(to_client_fifo == -1, 1, "Couldn't create file %s",to_client_name);
 
   int to_client_fd = open(to_client_name,O_RDWR);
@@ -83,9 +83,9 @@ int server_add_client(server_t *server, join_t *join)
   strcpy(new_client.to_client_fname,join->to_client_fname);
 
 
-  int to_server_fifo = mkfifo(join->to_server_fname, DEFAULT_PERMS);
   char *to_server_name;
-  sprintf(to_server_name, "%s.fifo",join->to_server_fname)
+  sprintf(to_server_name, "%s.fifo",join->to_server_fname);
+  int to_server_fifo = mkfifo(to_server_name, DEFAULT_PERMS);
   check_fail(to_server_fifo == -1, 1, "Couldn't create file %s",to_server_name);
 
   int to_server_fd = open(to_server_name,O_RDWR);
@@ -115,7 +115,7 @@ int server_add_client(server_t *server, join_t *join)
 
 int server_remove_client(server_t *server, int idx)
 {
-  client_t *rm_client = server->client[idx];
+  client_t *rm_client = &(server->client[idx]);
   close(rm_client->to_client_fd);
   close(rm_client->to_server_fd);
   remove(rm_client.name);
@@ -180,7 +180,7 @@ void server_check_sources(server_t *server)
 
   for(int j = 0;j<count;j++)
   {
-    client = server_get_client(server,i);
+    client_t *client = server_get_client(server,j);
     if(FD_ISSET(client->to_server_fd, &my_set))
     {
       client->data_ready = 1;
@@ -203,7 +203,7 @@ int server_join_ready(server_t *server)
 
 int server_handle_join(server_t *server)
 {
-  checkfail(server_join_ready == 0,0,"Server can't be joined\n");
+  check_fail(server_join_ready(server) == 0,0,"Server can't be joined\n");
 
   join_t request;
   int n_bytes = read(server->join_fd,&request,sizeof(join_t));
@@ -225,7 +225,7 @@ int server_client_ready(server_t *server, int idx)
 
 int server_handle_client(server_t *server, int idx)
 {
-  checkfail(server_client_ready == 0,0,"Nothing to read from client\n");
+  check_fail(server_client_ready(server,idx) == 0,0,"Nothing to read from client\n");
 
   client_t *client = server_get_client(server,idx);
   mesg_t message;
@@ -234,11 +234,11 @@ int server_handle_client(server_t *server, int idx)
 
   if((message.kind == BL_DEPARTED) || (message.kind == BL_MESG) || (message.kind == BL_JOINED) || (message.kind == BL_DISCONNECTED))
   {
-    server_broadcast(server,message);
+    server_broadcast(server,&message);
   }
   else
   {
-    printf("Message not specified\n", );
+    printf("Message not specified\n");
   }
   client->data_ready = 0;
   client->last_contact_time = server->time_sec;
@@ -255,7 +255,7 @@ int server_handle_client(server_t *server, int idx)
 // ADVANCED: Update the last_contact_time of the client to the current
 // server time_sec.
 
-void server_tick(server_t *server);
+void server_tick(server_t *server)
 {
   (server->time_sec)++;
 }

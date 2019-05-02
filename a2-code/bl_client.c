@@ -1,115 +1,131 @@
 #include "blather.h"
 
-static struct termios oldt, newt; // structs to change the terminal input mode
+simpio_t simpio_actual;
+simpio_t *simpio = &simpio_actual;
 
-// Set non-canonical mode so that each character of input is available
-// immediately
-void simpio_noncanonical_terminal_mode(){
-  // Turn off output buffering
-  setvbuf(stdout, NULL, _IONBF, 0);
+client_t client_actual;
+client_t *client = &client_actual;
 
-  // tcgetattr gets the parameters of the current terminal
-  // STDIN_FILENO will tell tcgetattr that it should write the
-  // settings of stdin to oldt
-  tcgetattr( STDIN_FILENO, &oldt);
+pthread_t user_thread;          // thread managing user input
+pthread_t server_thread;
 
-  // now the settings will be copied
-  newt = oldt;
+// Worker thread to manage user input
+void *user_worker(void *arg){
+  int count = 1;
+  while(!simpio->end_of_input){
+    simpio_reset(simpio);
+    iprintf(simpio, "");                                          // print prompt
+    while(!simpio->line_ready && !simpio->end_of_input){          // read until line is complete
+      simpio_get_char(simpio);
+    }
+    if(simpio->line_ready){
+      mesg_t message;
+      message.kind = BL_MESG;
+      strcpy(message.name,client->name);
+      strcpy(message.body,simpio->buf);
 
-  // ICANON normally takes care that one line at a time will be
-  // processed that means it will return if it sees a "\n" or an EOF
-  // or an EOL
-  newt.c_lflag &= ~(ICANON | ECHO);
-  //  newt.c_lflag &= ~(ICANON);
+      char *name;
+      sprintf(name,"%s.fifo",client->to_server_fname);
+      int to_server_fd = open(name,O_RDWR);
+      check_fail(to_server_fd < 0,1,"Can't open to_server_fd\n");
 
-  // Those new settings will be set to STDIN TCSANOW tells tcsetattr
-  // to change attributes immediately.
-  tcsetattr( STDIN_FILENO, TCSANOW, &newt);
+      int n_bytes = write(to_server_fd, &message,sizeof(mesg_t));
+      check_fail(to_server_fd == -1,1,"Can't write to_server_fd\n");
+      //iprintf(simpio, "%2d You entered: %s\n",count,simpio->buf);
+      count++;
+    }
+  }
 
+  mesg_t leaving_message;
+  leaving_message.kind = BL_DEPARTED;
+  pthread_cancel(server_thread); // kill the background thread
+  return NULL;
 }
 
-// Reset terminal mode to what is was prior to
-// simpio_set_noncanonical_mode()
-void simpio_reset_terminal_mode(){
-  tcsetattr( STDIN_FILENO, TCSANOW, &oldt);
+// Worker thread to listen to the info from the server.
+void *server_worker(void *arg){
+  mesg_t message;
+  int n_bytes = read(client->to_client_fd,&message,sizeof(message));
+  check_fail(n_bytes < 0,1,"Server can read from client %s\n",client->name);
+  while(1)
+  {
+    if(message.kind == BL_MESG)
+    {
+      iprintf(simpio,"[%s] : %s",message.name,message.body);
+    }
+    else if(message.kind == BL_JOINED)
+    {
+      iprintf(simpio,"-- %s JOINED --",message.name);
+    }
+    else if(message.kind == BL_DEPARTED)
+    {
+      iprintf(simpio,"-- %s DEPARTED --",message.name);
+    }
+    else if(message.kind == BL_SHUTDOWN)
+    {
+      iprintf(simpio,"!!! server is shutting down !!!");
+      break;
+    }
+    else if(message.kind == BL_DISCONNECTED)
+    {
+      iprintf(simpio,"-- %s DEPARTED --",message.name);
+    }
+  }
+
+  pthread_cancel(user_thread); // kill the background thread
+  return NULL;
 }
 
-// Reset the simpio_t object to have 0 for position and flags. Usually
-// done after completing input and processing it.
-void simpio_reset(simpio_t *simpio){
-  simpio->pos = 0;
-  simpio->buf[0] = '\0';
-  simpio->line_ready = 0;
-  simpio->end_of_input = 0;
-  simpio->infile  = stdin;
-  simpio->outfile = stdout;
-}
 
-// Set the prompt for the simpio handle. Maximum length for the prompt
-// is MAXNAME.
-void simpio_set_prompt(simpio_t *simpio, char *prompt){
-  strncpy(simpio->prompt, prompt, MAXNAME);
-}
+int main(int argc, char *argv[]){
+  if (argc < 2)
+  {
+    printf("Not enough arguments\n");
+    exit(0);
+  }
 
-// Assumes things are in non-canonical terminal mode otherwise results
-// may vary.  Read a character from the input associated with
-// simpio. Fields are adjusted to reflect the state of input after
-// reading the character. Typically:
-//
-// - simpio->pos will increase
-// - simpio->buf will get one more character
-// - simpio->line_ready may be set to 1 if a line is completed
-// - for backspaces, buf and pos decrease
-//
-// This funciton is used in a loop to read input until line_ready is 1.
-void simpio_get_char(simpio_t *simpio){
-  int c = fgetc(simpio->infile);
-  if(0){}
-  else if(c == '\n' && simpio->pos > 0){
-    simpio->buf[simpio->pos] = '\0';
-    simpio->line_ready = 1;
-  }
-  else if((c == '\b' || c == DEL || c == '\n') && simpio->pos == 0){
-    // ignore enter, backspace without input
-  }
-  else if(c == EOT && simpio->pos > 0){
-    simpio->buf[simpio->pos] = '\0';
-    simpio->line_ready = 1;
-  }
-  else if((c == '\b' || c == DEL) && simpio->pos > 0){ // backspace or delete
-    simpio->pos = simpio->pos-1;
-    simpio->buf[simpio->pos] = '\0';
-    int fd = fileno(simpio->outfile);
-    write(fd, "\b \b", 3);                              // erase last character
-  }
-  else if(c != EOF && c != EOT && simpio->pos < MAXLINE-1){ // normal chars get added
-    simpio->buf[simpio->pos] = c;
-    simpio->pos++;
-    simpio->buf[simpio->pos] = '\0';
-    fputc(c,simpio->outfile);
-  }
-  if(c == EOF || c == EOT){     // check for end of input
-    simpio->end_of_input = 1;
-  }
-}
+  char prompt[MAXNAME];
+  snprintf(prompt, MAXNAME, "%s>> ","fgnd"); // create a prompt string
+  simpio_set_prompt(simpio, prompt);         // set the prompt
+  simpio_reset(simpio);                      // initialize io
+  simpio_noncanonical_terminal_mode();       // set the terminal into a compatible mode
 
-// Print like printf but move the input prompt ahead and preserve the
-// input that has been typed so far along with the prompt.
-void iprintf(simpio_t *simpio, char *fmt, ...){
-  char output[MAXLINE*2];       // buffer for message
-  int max = MAXLINE*2;
-  int off = 0;
-  off += snprintf(output+off, max-off, "\33[2K\r");           // erase line
-  va_list myargs;
-  va_start(myargs, fmt);
-  off += vsnprintf(output+off,MAXLINE,fmt,myargs);            // add on the new message
-  va_end(myargs);
-  off += snprintf(output+off, max-off, "%s", simpio->prompt); // add prompt back
-  off += snprintf(output+off, max-off, "%s", simpio->buf);    // current typed input
+  char server_name[MAXPATH];
+  strcpy(server_name,argv[0]);
+  char client_name[MAXPATH];
+  strcpy(client_name,argv[1]);
 
-  int fd = fileno(simpio->outfile);
-  write(fd, output, off);
+  char *name;
+  sprintf(name,"%s.fifo", server_name);
+  int join_fd = open(name, O_RDWR);
 
-  // fprintf(input->outfile, "%s", input->prompt);
-  // simpio_print(input);
+  join_t join_request;
+  strcpy(join_request.name,client_name);
+
+  //create name for to_client_fd
+  sprintf(join_request.to_client_fname, "%d", getpid());
+  strcpy(client->to_client_fname,join_request.to_client_fname);
+  char *to_client_name;
+  sprintf(to_client_name,"%s.fifo",join_request.to_client_fname);
+  int to_client_fifo = mkfifo(to_client_name, DEFAULT_PERMS);
+  check_fail(to_client_fifo < 0, 1,"Couldn't create file %s", to_client_name);
+
+  //create temporary file name for to_server_fd
+  char *tempname;
+  sprintf(join_request.to_server_fname, "%s", tmpnam(tempname));
+  strcpy(client->to_server_fname,join_request.to_client_fname);
+  char *to_server_name;
+  sprintf(to_server_name,"%s.fifo",join_request.to_server_fname);
+  int to_server_fifo = mkfifo(to_server_name, DEFAULT_PERMS);
+  check_fail(to_server_fifo < 0,1, "Couldn't create file %s", to_server_name);
+
+
+  pthread_create(&user_thread,   NULL, user_worker,   NULL);     // start user thread to read input
+  pthread_create(&server_thread, NULL, server_worker, NULL);
+  pthread_join(user_thread, NULL);
+  pthread_join(server_thread, NULL);
+
+  simpio_reset_terminal_mode();
+  printf("\n");                 // newline just to make returning to the terminal prettier
+  return 0;
 }
